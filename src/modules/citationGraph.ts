@@ -9,6 +9,21 @@ const WHEEL_ZOOM_OUT_FACTOR = 0.94;
 const PINCH_SENSITIVITY = 0.0012;
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XHTML_NS = "http://www.w3.org/1999/xhtml";
+const ROOT_LOCAL_NODE_COLOR = "#1976d2";
+const MULTI_SUBCOLLECTION_NODE_COLOR = "#64748b";
+const EXTERNAL_NODE_COLOR = "#ef6c00";
+const SUBCOLLECTION_PALETTE = [
+  "#0077b6",
+  "#2a9d8f",
+  "#4f772d",
+  "#8f5d00",
+  "#bc6c25",
+  "#d62828",
+  "#9d4edd",
+  "#6d597a",
+  "#5f0f40",
+  "#1d3557",
+];
 
 interface CitationGraphOptions {
   collectionID: number;
@@ -26,6 +41,9 @@ interface GraphNode {
   doi?: string;
   openAlexID?: string;
   depth: number;
+  isInRootCollection?: boolean;
+  subcollectionIDs?: number[];
+  subcollectionPaths?: string[];
 }
 
 interface GraphEdge {
@@ -39,8 +57,17 @@ interface CitationGraphData {
   collectionName: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  subcollections: SubcollectionInfo[];
   options: CitationGraphOptions;
   truncated: boolean;
+}
+
+interface SubcollectionInfo {
+  id: number;
+  name: string;
+  path: string;
+  depth: number;
+  color: string;
 }
 
 interface OpenAlexWork {
@@ -69,6 +96,30 @@ interface CitationCacheData {
 interface GraphViewState {
   hiddenNodeIDs: Set<string>;
   hiddenEdgeKeys: Set<string>;
+  selectedSubcollectionIDs: Set<number>;
+}
+
+interface LocalItemMembership {
+  isInRootCollection: boolean;
+  subcollectionIDs: number[];
+  subcollectionPaths: string[];
+}
+
+interface LocalScopeData {
+  items: Zotero.Item[];
+  itemMemberships: Map<number, LocalItemMembership>;
+  subcollections: SubcollectionInfo[];
+}
+
+interface LabColor {
+  l: number;
+  a: number;
+  b: number;
+}
+
+interface ColorCandidate {
+  css: string;
+  lab: LabColor;
 }
 
 interface GraphRenderCallbacks {
@@ -315,7 +366,7 @@ export class CitationGraphFactory {
       collectionID: defaultCollectionID ? String(defaultCollectionID) : "",
       useOnlineLookup: true,
       includeExternalReferences: true,
-      extensionDepth: 1,
+      extensionDepth: 0,
     };
 
     new ztoolkit.Dialog(8, 2)
@@ -461,7 +512,7 @@ export class CitationGraphFactory {
       collectionID,
       useOnlineLookup: Boolean(dialogData.useOnlineLookup),
       includeExternalReferences: Boolean(dialogData.includeExternalReferences),
-      extensionDepth: clampInt(dialogData.extensionDepth, 0, 5, 1),
+      extensionDepth: clampInt(dialogData.extensionDepth, 0, 5, 0),
     };
   }
 
@@ -470,13 +521,14 @@ export class CitationGraphFactory {
     options: CitationGraphOptions,
     updateProgress: (message: string, progress: number) => void,
   ): Promise<CitationGraphData> {
-    updateProgress("Reading collection items...", 10);
-    const items = collection
-      .getChildItems(false, false)
-      .filter((item) => item.isRegularItem() && item.isTopLevelItem());
+    updateProgress("Reading collection and subcollections...", 10);
+    const localScope = this.collectLocalScopeData(collection);
+    const items = localScope.items;
 
     if (!items.length) {
-      throw new Error("No top-level regular items found in this collection.");
+      throw new Error(
+        "No regular top-level items found in the selected collection scope.",
+      );
     }
 
     const nodes = new Map<string, GraphNode>();
@@ -496,6 +548,7 @@ export class CitationGraphFactory {
       const nodeID = `local:${item.libraryID}:${item.key}`;
       const title = (item.getDisplayTitle() || item.getField("title")).trim();
       const doi = normalizeDOI(item.getField("DOI"));
+      const membership = localScope.itemMemberships.get(item.id);
       const node: GraphNode = {
         id: nodeID,
         nodeType: "local",
@@ -504,6 +557,9 @@ export class CitationGraphFactory {
         label: title || `Item ${item.id}`,
         doi,
         depth: 0,
+        isInRootCollection: membership?.isInRootCollection ?? false,
+        subcollectionIDs: membership?.subcollectionIDs || [],
+        subcollectionPaths: membership?.subcollectionPaths || [],
       };
 
       nodes.set(nodeID, node);
@@ -792,8 +848,125 @@ export class CitationGraphFactory {
       collectionName: collection.name,
       nodes: [...nodes.values()],
       edges: [...edges.values()],
+      subcollections: localScope.subcollections,
       options,
       truncated,
+    };
+  }
+
+  private static collectLocalScopeData(
+    rootCollection: Zotero.Collection,
+  ): LocalScopeData {
+    const itemByID = new Map<number, Zotero.Item>();
+    const membershipByItemID = new Map<
+      number,
+      {
+        isInRootCollection: boolean;
+        subcollectionIDs: Set<number>;
+        subcollectionPathByID: Map<number, string>;
+      }
+    >();
+    const subcollectionByID = new Map<number, SubcollectionInfo>();
+
+    const queue: Array<{
+      collection: Zotero.Collection;
+      path: string;
+      depth: number;
+      isRoot: boolean;
+    }> = [
+      {
+        collection: rootCollection,
+        path: rootCollection.name,
+        depth: 0,
+        isRoot: true,
+      },
+    ];
+    const seenCollectionIDs = new Set<number>();
+
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current) continue;
+      if (seenCollectionIDs.has(current.collection.id)) continue;
+      seenCollectionIDs.add(current.collection.id);
+
+      const scopedItems = current.collection
+        .getChildItems(false, false)
+        .filter((item) => item.isRegularItem() && item.isTopLevelItem());
+
+      for (const item of scopedItems) {
+        itemByID.set(item.id, item);
+        if (!membershipByItemID.has(item.id)) {
+          membershipByItemID.set(item.id, {
+            isInRootCollection: false,
+            subcollectionIDs: new Set<number>(),
+            subcollectionPathByID: new Map<number, string>(),
+          });
+        }
+
+        const membership = membershipByItemID.get(item.id)!;
+        if (current.isRoot) {
+          membership.isInRootCollection = true;
+        } else {
+          membership.subcollectionIDs.add(current.collection.id);
+          membership.subcollectionPathByID.set(
+            current.collection.id,
+            current.path,
+          );
+        }
+      }
+
+      const childCollections = ((current.collection as any).getChildCollections?.(
+        false,
+        false,
+      ) || []) as Zotero.Collection[];
+
+      for (const child of childCollections) {
+        const childPath = `${current.path} / ${child.name}`;
+        subcollectionByID.set(child.id, {
+          id: child.id,
+          name: child.name,
+          path: childPath,
+          depth: current.depth + 1,
+          color: "",
+        });
+
+        if (!seenCollectionIDs.has(child.id)) {
+          queue.push({
+            collection: child,
+            path: childPath,
+            depth: current.depth + 1,
+            isRoot: false,
+          });
+        }
+      }
+    }
+
+    const itemMemberships = new Map<number, LocalItemMembership>();
+    for (const [itemID, membership] of membershipByItemID.entries()) {
+      const sortedSubcollectionIDs = [...membership.subcollectionIDs].sort(
+        (left, right) => left - right,
+      );
+      const sortedPaths = sortedSubcollectionIDs
+        .map((id) => membership.subcollectionPathByID.get(id) || "")
+        .filter(Boolean)
+        .sort((left, right) => left.localeCompare(right));
+
+      itemMemberships.set(itemID, {
+        isInRootCollection: membership.isInRootCollection,
+        subcollectionIDs: sortedSubcollectionIDs,
+        subcollectionPaths: sortedPaths,
+      });
+    }
+
+    const sortedSubcollections = [...subcollectionByID.values()].sort(
+      (left, right) => left.path.localeCompare(right.path),
+    );
+    this.assignDistinctSubcollectionColors(sortedSubcollections);
+
+    return {
+      items: [...itemByID.values()],
+      itemMemberships,
+      subcollections: sortedSubcollections,
     };
   }
 
@@ -816,6 +989,160 @@ export class CitationGraphFactory {
       if (byTitle) return byTitle;
     }
     return undefined;
+  }
+
+  private static assignDistinctSubcollectionColors(
+    subcollections: SubcollectionInfo[],
+  ) {
+    if (!subcollections.length) return;
+
+    const candidates = buildSubcollectionColorCandidates();
+    const selectedCandidates: ColorCandidate[] = [];
+    const reservedLabs = [
+      colorStringToLab(ROOT_LOCAL_NODE_COLOR),
+      colorStringToLab(MULTI_SUBCOLLECTION_NODE_COLOR),
+      colorStringToLab(EXTERNAL_NODE_COLOR),
+    ].filter(Boolean) as LabColor[];
+
+    for (const subcollection of subcollections) {
+      const picked = this.pickMostDistinctColorCandidate(
+        candidates,
+        selectedCandidates,
+        reservedLabs,
+      );
+      subcollection.color = picked.css;
+      selectedCandidates.push(picked);
+    }
+  }
+
+  private static pickMostDistinctColorCandidate(
+    candidates: ColorCandidate[],
+    selected: ColorCandidate[],
+    reservedLabs: LabColor[],
+  ) {
+    if (!candidates.length) {
+      return makeGeneratedColorCandidate(selected.length + reservedLabs.length);
+    }
+
+    let bestIndex = 0;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      const minDistanceToSelected = selected.length
+        ? Math.min(
+            ...selected.map((entry) => labDistance(candidate.lab, entry.lab)),
+          )
+        : Number.POSITIVE_INFINITY;
+      const minDistanceToReserved = reservedLabs.length
+        ? Math.min(
+            ...reservedLabs.map((entry) => labDistance(candidate.lab, entry)),
+          )
+        : Number.POSITIVE_INFINITY;
+
+      const score = Math.min(minDistanceToSelected, minDistanceToReserved);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    }
+
+    const [picked] = candidates.splice(bestIndex, 1);
+    if (picked) {
+      return picked;
+    }
+
+    return makeGeneratedColorCandidate(selected.length + reservedLabs.length);
+  }
+
+  private static filterGraphBySelectedSubcollections(
+    data: CitationGraphData,
+    selectedSubcollectionIDs: Set<number>,
+  ) {
+    const nodeByID = new Map(data.nodes.map((node) => [node.id, node]));
+    const visibleLocalNodeIDs = new Set<string>();
+
+    for (const node of data.nodes) {
+      if (node.nodeType !== "local") continue;
+
+      const scopedSubcollectionIDs = (node.subcollectionIDs || []).filter((id) =>
+        selectedSubcollectionIDs.has(id),
+      );
+      const visible = Boolean(node.isInRootCollection) || scopedSubcollectionIDs.length > 0;
+      if (visible) {
+        visibleLocalNodeIDs.add(node.id);
+      }
+    }
+
+    const scopedEdges = data.edges.filter((edge) => {
+      const source = nodeByID.get(edge.source);
+      const target = nodeByID.get(edge.target);
+      if (!source || !target) return false;
+
+      if (source.nodeType === "local" && !visibleLocalNodeIDs.has(source.id)) {
+        return false;
+      }
+      if (target.nodeType === "local" && !visibleLocalNodeIDs.has(target.id)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const edgeNodeIDs = new Set<string>();
+    for (const edge of scopedEdges) {
+      edgeNodeIDs.add(edge.source);
+      edgeNodeIDs.add(edge.target);
+    }
+
+    const scopedNodes = data.nodes.filter((node) => {
+      if (node.nodeType === "local") {
+        return visibleLocalNodeIDs.has(node.id);
+      }
+      return edgeNodeIDs.has(node.id);
+    });
+
+    return {
+      nodes: scopedNodes,
+      edges: scopedEdges,
+      visibleLocalNodeIDs,
+    };
+  }
+
+  private static getLocalNodeColor(
+    node: GraphNode,
+    selectedSubcollectionIDs: Set<number>,
+    subcollectionColorByID: Map<number, string>,
+  ) {
+    const selectedSubcollections = (node.subcollectionIDs || []).filter((id) =>
+      selectedSubcollectionIDs.has(id),
+    );
+
+    if (selectedSubcollections.length === 0) {
+      return ROOT_LOCAL_NODE_COLOR;
+    }
+    if (selectedSubcollections.length === 1) {
+      return (
+        subcollectionColorByID.get(selectedSubcollections[0]) ||
+        ROOT_LOCAL_NODE_COLOR
+      );
+    }
+    return MULTI_SUBCOLLECTION_NODE_COLOR;
+  }
+
+  private static getNodeColor(
+    node: GraphNode,
+    viewState: GraphViewState,
+    subcollectionColorByID: Map<number, string>,
+  ) {
+    if (node.nodeType === "external") {
+      return EXTERNAL_NODE_COLOR;
+    }
+    return this.getLocalNodeColor(
+      node,
+      viewState.selectedSubcollectionIDs,
+      subcollectionColorByID,
+    );
   }
 
   private static openGraphWindow(graphData: CitationGraphData) {
@@ -914,6 +1241,9 @@ export class CitationGraphFactory {
     const viewState: GraphViewState = {
       hiddenNodeIDs: new Set(),
       hiddenEdgeKeys: new Set(),
+      selectedSubcollectionIDs: new Set(
+        initialData.subcollections.map((subcollection) => subcollection.id),
+      ),
     };
 
     let currentData = initialData;
@@ -971,6 +1301,59 @@ export class CitationGraphFactory {
     statusSpan.style.fontSize = "12px";
     statusSpan.style.marginLeft = "6px";
 
+    const subcollectionContainer = doc.createElement("div");
+    subcollectionContainer.style.width = "100%";
+    subcollectionContainer.style.marginTop = "6px";
+    subcollectionContainer.style.paddingTop = "6px";
+    subcollectionContainer.style.borderTop = "1px dashed #d7dde6";
+
+    const subcollectionHeader = doc.createElement("div");
+    subcollectionHeader.style.display = "flex";
+    subcollectionHeader.style.alignItems = "center";
+    subcollectionHeader.style.gap = "6px";
+    subcollectionHeader.style.flexWrap = "wrap";
+
+    const subcollectionLabel = doc.createElement("span");
+    subcollectionLabel.style.fontWeight = "600";
+    subcollectionLabel.textContent = "Subcollections";
+
+    const selectAllSubcollectionsButton = doc.createElement("button");
+    selectAllSubcollectionsButton.textContent = "All";
+    selectAllSubcollectionsButton.style.padding = "2px 8px";
+    selectAllSubcollectionsButton.style.border = "1px solid #cfd8e3";
+    selectAllSubcollectionsButton.style.borderRadius = "6px";
+    selectAllSubcollectionsButton.style.cursor = "pointer";
+    selectAllSubcollectionsButton.style.background = "#fff";
+
+    const clearSubcollectionsButton = doc.createElement("button");
+    clearSubcollectionsButton.textContent = "None";
+    clearSubcollectionsButton.style.padding = "2px 8px";
+    clearSubcollectionsButton.style.border = "1px solid #cfd8e3";
+    clearSubcollectionsButton.style.borderRadius = "6px";
+    clearSubcollectionsButton.style.cursor = "pointer";
+    clearSubcollectionsButton.style.background = "#fff";
+
+    const subcollectionSelectionSummary = doc.createElement("span");
+    subcollectionSelectionSummary.style.color = "#64748b";
+    subcollectionSelectionSummary.style.fontSize = "12px";
+
+    subcollectionHeader.append(
+      subcollectionLabel,
+      selectAllSubcollectionsButton,
+      clearSubcollectionsButton,
+      subcollectionSelectionSummary,
+    );
+
+    const subcollectionList = doc.createElement("div");
+    subcollectionList.style.display = "flex";
+    subcollectionList.style.flexWrap = "wrap";
+    subcollectionList.style.gap = "6px 10px";
+    subcollectionList.style.maxHeight = "120px";
+    subcollectionList.style.overflow = "auto";
+    subcollectionList.style.padding = "6px 0 2px";
+
+    subcollectionContainer.append(subcollectionHeader, subcollectionList);
+
     settingsContainer.append(
       createInputLabel("Collection"),
       collectionIDInput,
@@ -983,7 +1366,86 @@ export class CitationGraphFactory {
       reloadButton,
       resetViewButton,
       statusSpan,
+      subcollectionContainer,
     );
+
+    const selectAllSubcollections = () => {
+      viewState.selectedSubcollectionIDs = new Set(
+        currentData.subcollections.map((subcollection) => subcollection.id),
+      );
+    };
+
+    const renderSubcollectionFilters = () => {
+      subcollectionList.textContent = "";
+      const allSubcollections = currentData.subcollections;
+      const total = allSubcollections.length;
+      const selected = allSubcollections.filter((subcollection) =>
+        viewState.selectedSubcollectionIDs.has(subcollection.id),
+      ).length;
+      subcollectionSelectionSummary.textContent = `${selected}/${total} selected`;
+
+      if (!allSubcollections.length) {
+        const emptyLabel = doc.createElement("span");
+        emptyLabel.style.color = "#64748b";
+        emptyLabel.style.fontSize = "12px";
+        emptyLabel.textContent = "No descendant subcollections.";
+        subcollectionList.appendChild(emptyLabel);
+        return;
+      }
+
+      for (const subcollection of allSubcollections) {
+        const option = doc.createElement("label");
+        option.style.display = "inline-flex";
+        option.style.alignItems = "center";
+        option.style.gap = "6px";
+        option.style.padding = "2px 4px";
+        option.style.borderRadius = "6px";
+        option.style.background = "#fff";
+        option.title = subcollection.path;
+
+        const checkbox = doc.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = viewState.selectedSubcollectionIDs.has(
+          subcollection.id,
+        );
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            viewState.selectedSubcollectionIDs.add(subcollection.id);
+          } else {
+            viewState.selectedSubcollectionIDs.delete(subcollection.id);
+          }
+          renderSubcollectionFilters();
+          renderCurrentGraph();
+        });
+
+        const swatch = doc.createElement("span");
+        swatch.style.width = "10px";
+        swatch.style.height = "10px";
+        swatch.style.borderRadius = "999px";
+        swatch.style.display = "inline-block";
+        swatch.style.background = subcollection.color;
+        swatch.style.border = "1px solid rgba(15,23,42,0.2)";
+
+        const text = doc.createElement("span");
+        text.style.fontSize = "12px";
+        text.textContent = subcollection.path;
+
+        option.append(checkbox, swatch, text);
+        subcollectionList.appendChild(option);
+      }
+    };
+
+    selectAllSubcollectionsButton.addEventListener("click", () => {
+      selectAllSubcollections();
+      renderSubcollectionFilters();
+      renderCurrentGraph();
+    });
+
+    clearSubcollectionsButton.addEventListener("click", () => {
+      viewState.selectedSubcollectionIDs.clear();
+      renderSubcollectionFilters();
+      renderCurrentGraph();
+    });
 
     const fitGraphHeight = () => {
       const settingsRect = settingsContainer.getBoundingClientRect();
@@ -1053,7 +1515,7 @@ export class CitationGraphFactory {
         collectionID,
         useOnlineLookup: useOnlineInput.checked,
         includeExternalReferences: includeExternalInput.checked,
-        extensionDepth: clampInt(depthInput.value, 0, 5, 1),
+        extensionDepth: clampInt(depthInput.value, 0, 5, 0),
       };
 
       reloadButton.disabled = true;
@@ -1063,8 +1525,10 @@ export class CitationGraphFactory {
         currentData = await this.buildGraphData(collection, options, (msg) => {
           statusSpan.textContent = msg;
         });
+        selectAllSubcollections();
         viewState.hiddenEdgeKeys.clear();
         viewState.hiddenNodeIDs.clear();
+        renderSubcollectionFilters();
         renderCurrentGraph();
         fitGraphHeight();
         statusSpan.textContent = "Reload finished.";
@@ -1082,6 +1546,7 @@ export class CitationGraphFactory {
       renderCurrentGraph();
     });
 
+    renderSubcollectionFilters();
     renderCurrentGraph();
   }
 
@@ -1095,20 +1560,47 @@ export class CitationGraphFactory {
     const container = doc.getElementById("citation-graph-container");
     if (!summary || !container) return;
 
-    const visibleNodes = data.nodes.filter(
+    const scopedGraph = this.filterGraphBySelectedSubcollections(
+      data,
+      viewState.selectedSubcollectionIDs,
+    );
+    const subcollectionColorByID = new Map(
+      data.subcollections.map((subcollection) => [
+        subcollection.id,
+        subcollection.color,
+      ]),
+    );
+    const subcollectionPathByID = new Map(
+      data.subcollections.map((subcollection) => [
+        subcollection.id,
+        subcollection.path,
+      ]),
+    );
+
+    const visibleNodes = scopedGraph.nodes.filter(
       (node) => !viewState.hiddenNodeIDs.has(node.id),
     );
     const visibleNodeIDs = new Set(visibleNodes.map((node) => node.id));
-    const visibleEdges = data.edges.filter((edge) => {
+    const visibleEdges = scopedGraph.edges.filter((edge) => {
       const edgeKey = `${edge.source}->${edge.target}`;
       if (viewState.hiddenEdgeKeys.has(edgeKey)) return false;
       return visibleNodeIDs.has(edge.source) && visibleNodeIDs.has(edge.target);
     });
 
+    const selectedSubcollectionCount = data.subcollections.filter(
+      (subcollection) =>
+        viewState.selectedSubcollectionIDs.has(subcollection.id),
+    ).length;
+    const localNodeCount = scopedGraph.nodes.filter(
+      (node) => node.nodeType === "local",
+    ).length;
+
     summary.textContent = [
       `Collection: ${data.collectionName} (#${data.collectionID})`,
-      `Nodes: ${visibleNodes.length}/${data.nodes.length}`,
-      `Edges: ${visibleEdges.length}/${data.edges.length}`,
+      `Nodes: ${visibleNodes.length}/${scopedGraph.nodes.length}`,
+      `Edges: ${visibleEdges.length}/${scopedGraph.edges.length}`,
+      `Local in scope: ${localNodeCount}`,
+      `Subcollections: ${selectedSubcollectionCount}/${data.subcollections.length}`,
       `Online: ${data.options.useOnlineLookup ? "yes" : "no"}`,
       `Include external: ${data.options.includeExternalReferences ? "yes" : "no"}`,
       `Depth: ${data.options.extensionDepth}`,
@@ -1317,10 +1809,7 @@ export class CitationGraphFactory {
       circle.setAttribute("cx", String(pos.x));
       circle.setAttribute("cy", String(pos.y));
       circle.setAttribute("r", String(pos.r));
-      circle.setAttribute(
-        "fill",
-        node.nodeType === "local" ? "#1976d2" : "#ef6c00",
-      );
+      circle.setAttribute("fill", this.getNodeColor(node, viewState, subcollectionColorByID));
       circle.setAttribute(
         "opacity",
         node.nodeType === "local" ? "0.95" : "0.8",
@@ -1349,9 +1838,25 @@ export class CitationGraphFactory {
       }
 
       const tooltip = doc.createElementNS(SVG_NS, "title");
-      tooltip.textContent = [node.title, node.doi ? `DOI: ${node.doi}` : ""]
-        .filter(Boolean)
-        .join("\n");
+      const tooltipLines: string[] = [node.title];
+      if (node.doi) {
+        tooltipLines.push(`DOI: ${node.doi}`);
+      }
+      if (node.nodeType === "local") {
+        if (node.isInRootCollection) {
+          tooltipLines.push("Root collection: yes");
+        }
+        if (node.subcollectionPaths?.length) {
+          tooltipLines.push(`Subcollections: ${node.subcollectionPaths.join(" | ")}`);
+        }
+        const selectedPaths = (node.subcollectionIDs || [])
+          .filter((id) => viewState.selectedSubcollectionIDs.has(id))
+          .map((id) => subcollectionPathByID.get(id) || `#${id}`);
+        if (selectedPaths.length > 1) {
+          tooltipLines.push(`Visible via multiple selected subcollections (${selectedPaths.length})`);
+        }
+      }
+      tooltip.textContent = tooltipLines.filter(Boolean).join("\n");
       group.appendChild(tooltip);
 
       group.addEventListener("click", () => this.handleNodeClick(node));
@@ -1381,7 +1886,7 @@ export class CitationGraphFactory {
       ].join(";"),
     );
     legend.textContent =
-      "Blue: item in selected collection (click to select) | Orange: external paper (click to open DOI/OpenAlex) | Mouse wheel: zoom | Touchpad two-finger move: pan | Pinch: zoom";
+      "Blue: root-scope local item | Subcollection colors: see checkbox chips | Gray: item in multiple selected subcollections | Orange: external paper | Mouse wheel: zoom | Touchpad two-finger move: pan | Pinch: zoom";
     root.appendChild(legend);
 
     const controls = doc.createElementNS(XHTML_NS, "div");
@@ -1819,6 +2324,186 @@ function clampNumber(value: number, min: number, max: number) {
   if (value < min) return min;
   if (value > max) return max;
   return value;
+}
+
+function buildSubcollectionColorCandidates() {
+  const candidates: ColorCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const baseColor of SUBCOLLECTION_PALETTE) {
+    const normalized = baseColor.toLowerCase();
+    if (seen.has(normalized)) continue;
+    const lab = colorStringToLab(normalized);
+    if (!lab) continue;
+    candidates.push({ css: normalized, lab });
+    seen.add(normalized);
+  }
+
+  const hueStep = 12;
+  const saturations = [64, 72, 80];
+  const lightnesses = [42, 50, 58];
+  for (let hue = 0; hue < 360; hue += hueStep) {
+    for (const saturation of saturations) {
+      for (const lightness of lightnesses) {
+        const candidateColor = rgbToHex(
+          hslToRgb(hue, saturation / 100, lightness / 100),
+        );
+        if (seen.has(candidateColor)) continue;
+        const lab = colorStringToLab(candidateColor);
+        if (!lab) continue;
+        candidates.push({ css: candidateColor, lab });
+        seen.add(candidateColor);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function makeGeneratedColorCandidate(seed: number): ColorCandidate {
+  for (let attempt = 0; attempt < 2048; attempt += 1) {
+    const n = seed + attempt;
+    const hue = (n * 137.508) % 360;
+    const saturation = (60 + ((Math.floor(n / 13) % 5) * 7)) / 100;
+    const lightness = (40 + ((Math.floor(n / 29) % 4) * 7)) / 100;
+    const css = rgbToHex(hslToRgb(hue, saturation, lightness));
+    const lab = colorStringToLab(css);
+    if (!lab) continue;
+    return { css, lab };
+  }
+
+  const fallback = "#5b8def";
+  return {
+    css: fallback,
+    lab: colorStringToLab(fallback) || { l: 58, a: 18, b: -46 },
+  };
+}
+
+function colorStringToLab(color: string): LabColor | undefined {
+  const rgb = parseHexColor(color) || parseHslColor(color);
+  if (!rgb) return undefined;
+  return rgbToLab(rgb);
+}
+
+function parseHexColor(color: string) {
+  const trimmed = (color || "").trim();
+  const hex = trimmed.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if (!hex) return undefined;
+
+  const raw = hex[1].toLowerCase();
+  const full =
+    raw.length === 3
+      ? `${raw[0]}${raw[0]}${raw[1]}${raw[1]}${raw[2]}${raw[2]}`
+      : raw;
+
+  return {
+    r: Number.parseInt(full.slice(0, 2), 16),
+    g: Number.parseInt(full.slice(2, 4), 16),
+    b: Number.parseInt(full.slice(4, 6), 16),
+  };
+}
+
+function parseHslColor(color: string) {
+  const trimmed = (color || "").trim();
+  const match = trimmed.match(
+    /^hsl\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)%\s*,\s*(\d+(?:\.\d+)?)%\s*\)$/i,
+  );
+  if (!match) return undefined;
+
+  const h = Number.parseFloat(match[1]);
+  const s = clampNumber(Number.parseFloat(match[2]) / 100, 0, 1);
+  const l = clampNumber(Number.parseFloat(match[3]) / 100, 0, 1);
+  return hslToRgb(h, s, l);
+}
+
+function hslToRgb(hue: number, saturation: number, lightness: number) {
+  const h = ((hue % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = lightness - c / 2;
+
+  let rPrime = 0;
+  let gPrime = 0;
+  let bPrime = 0;
+
+  if (h < 60) {
+    rPrime = c;
+    gPrime = x;
+  } else if (h < 120) {
+    rPrime = x;
+    gPrime = c;
+  } else if (h < 180) {
+    gPrime = c;
+    bPrime = x;
+  } else if (h < 240) {
+    gPrime = x;
+    bPrime = c;
+  } else if (h < 300) {
+    rPrime = x;
+    bPrime = c;
+  } else {
+    rPrime = c;
+    bPrime = x;
+  }
+
+  return {
+    r: Math.round((rPrime + m) * 255),
+    g: Math.round((gPrime + m) * 255),
+    b: Math.round((bPrime + m) * 255),
+  };
+}
+
+function rgbToHex(rgb: { r: number; g: number; b: number }) {
+  const toHex = (value: number) =>
+    clampInt(value, 0, 255, 0).toString(16).padStart(2, "0");
+  return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
+}
+
+function rgbToLab(rgb: { r: number; g: number; b: number }): LabColor {
+  const r = srgbToLinear(rgb.r / 255);
+  const g = srgbToLinear(rgb.g / 255);
+  const b = srgbToLinear(rgb.b / 255);
+
+  const x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375;
+  const y = r * 0.2126729 + g * 0.7151522 + b * 0.072175;
+  const z = r * 0.0193339 + g * 0.119192 + b * 0.9503041;
+
+  const xr = x / 0.95047;
+  const yr = y / 1.0;
+  const zr = z / 1.08883;
+
+  const fx = labPivot(xr);
+  const fy = labPivot(yr);
+  const fz = labPivot(zr);
+
+  return {
+    l: 116 * fy - 16,
+    a: 500 * (fx - fy),
+    b: 200 * (fy - fz),
+  };
+}
+
+function srgbToLinear(channel: number) {
+  if (channel <= 0.04045) {
+    return channel / 12.92;
+  }
+  return Math.pow((channel + 0.055) / 1.055, 2.4);
+}
+
+function labPivot(value: number) {
+  const epsilon = 216 / 24389;
+  const kappa = 24389 / 27;
+  if (value > epsilon) {
+    return Math.cbrt(value);
+  }
+  return (kappa * value + 16) / 116;
+}
+
+function labDistance(left: LabColor, right: LabColor) {
+  const dl = left.l - right.l;
+  const da = left.a - right.a;
+  const db = left.b - right.b;
+  return Math.hypot(dl, da, db);
 }
 
 function appendWrappedSvgText(
