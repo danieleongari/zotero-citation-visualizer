@@ -1178,6 +1178,24 @@ export class CitationGraphFactory {
       },
     };
 
+    const mainWin = Zotero.getMainWindow();
+    const rawAvailableWidth = Number(
+      mainWin?.screen?.availWidth || mainWin?.innerWidth || 1280,
+    );
+    const rawAvailableHeight = Number(
+      mainWin?.screen?.availHeight || mainWin?.innerHeight || 900,
+    );
+    const availableWidth =
+      Number.isFinite(rawAvailableWidth) && rawAvailableWidth > 0
+        ? rawAvailableWidth
+        : 1280;
+    const availableHeight =
+      Number.isFinite(rawAvailableHeight) && rawAvailableHeight > 0
+        ? rawAvailableHeight
+        : 900;
+    const dialogWidth = Math.min(1280, Math.max(1, Math.floor(availableWidth - 36)));
+    const dialogHeight = Math.min(900, Math.max(1, Math.floor(availableHeight - 96)));
+
     const dialog = new ztoolkit.Dialog(3, 1)
       .addCell(
         0,
@@ -1243,11 +1261,10 @@ export class CitationGraphFactory {
         },
         false,
       )
-      .addButton("Close", "close")
       .setDialogData(dialogData)
       .open("Citation Graph", {
-        width: 1280,
-        height: 900,
+        width: dialogWidth,
+        height: dialogHeight,
         centerscreen: true,
         noDialogMode: true,
         resizable: true,
@@ -1800,44 +1817,70 @@ export class CitationGraphFactory {
     };
     applyTransform();
 
-    svg.addEventListener(
-      "wheel",
-      (event: WheelEvent) => {
-        event.preventDefault();
-        const rect = svg.getBoundingClientRect();
-        const isPinch = Boolean(event.ctrlKey || event.metaKey);
-        const isTrackpadPan =
-          event.deltaMode === WheelEvent.DOM_DELTA_PIXEL &&
-          !isPinch &&
-          (Math.abs(event.deltaX) > 0.01 || Math.abs(event.deltaY) > 0.01);
+    const handleZoomScroll = (rawEvent: Event) => {
+      const event = rawEvent as WheelEvent & {
+        detail?: number;
+        wheelDelta?: number;
+      };
+      event.preventDefault();
+      event.stopPropagation();
 
-        if (isPinch) {
-          const point = clientToViewbox(event.clientX, event.clientY);
-          const factor = clampNumber(
-            Math.exp(-event.deltaY * PINCH_SENSITIVITY),
-            0.92,
-            1.08,
-          );
-          zoomAt(point.x, point.y, factor);
-          return;
-        }
+      const deltaMode = Number.isFinite(Number(event.deltaMode))
+        ? Number(event.deltaMode)
+        : 1;
+      const fallbackDelta = event.detail
+        ? Number(event.detail)
+        : event.wheelDelta
+          ? -Number(event.wheelDelta) / 40
+          : 0;
+      const deltaY = Number.isFinite(Number(event.deltaY))
+        ? Number(event.deltaY)
+        : fallbackDelta;
 
-        if (isTrackpadPan) {
-          tx -= (event.deltaX / rect.width) * VIEWBOX_WIDTH;
-          ty -= (event.deltaY / rect.height) * VIEWBOX_HEIGHT;
-          applyTransform();
-          return;
-        }
+      if (Math.abs(deltaY) < 0.001) {
+        return;
+      }
 
-        const point = clientToViewbox(event.clientX, event.clientY);
-        zoomAt(
-          point.x,
-          point.y,
-          event.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR,
+      const clientX = Number.isFinite(Number(event.clientX))
+        ? Number(event.clientX)
+        : svg.getBoundingClientRect().left + svg.getBoundingClientRect().width / 2;
+      const clientY = Number.isFinite(Number(event.clientY))
+        ? Number(event.clientY)
+        : svg.getBoundingClientRect().top + svg.getBoundingClientRect().height / 2;
+      const point = clientToViewbox(clientX, clientY);
+
+      const isPinch = Boolean(event.ctrlKey || event.metaKey);
+      if (isPinch) {
+        const factor = clampNumber(
+          Math.exp(-deltaY * PINCH_SENSITIVITY),
+          0.92,
+          1.08,
         );
-      },
-      { passive: false },
-    );
+        zoomAt(point.x, point.y, factor);
+        return;
+      }
+
+      if (deltaMode === 0) {
+        const factor = clampNumber(Math.exp(-deltaY * 0.0022), 0.9, 1.12);
+        zoomAt(point.x, point.y, factor);
+        return;
+      }
+
+      const factor = deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+      zoomAt(point.x, point.y, factor);
+    };
+
+    root.addEventListener("wheel", handleZoomScroll, { passive: false });
+    root.addEventListener("DOMMouseScroll", handleZoomScroll, {
+      passive: false,
+    });
+
+    svg.addEventListener("dblclick", () => {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      applyTransform();
+    });
 
     let isPanning = false;
     let panStartX = 0;
@@ -1990,52 +2033,8 @@ export class CitationGraphFactory {
       ].join(";"),
     );
     legend.textContent =
-      "Blue: root-scope local item | Subcollection colors: see checkbox chips | Gray: item in multiple selected subcollections | Orange: external paper | Mouse wheel: zoom | Touchpad two-finger move: pan | Pinch: zoom";
+      "Blue: root-scope local item | Subcollection colors: see checkbox chips | Gray: item in multiple selected subcollections | Orange: external paper | Mouse wheel: zoom | Drag: pan | Pinch: zoom | Double-click: reset view";
     root.appendChild(legend);
-
-    const controls = doc.createElementNS(XHTML_NS, "div");
-    controls.setAttribute(
-      "style",
-      [
-        "position:absolute",
-        "left:10px",
-        "top:10px",
-        "display:flex",
-        "gap:6px",
-      ].join(";"),
-    );
-    root.appendChild(controls);
-
-    const addControlButton = (label: string, onClick: () => void) => {
-      const button = doc.createElementNS(XHTML_NS, "button");
-      button.textContent = label;
-      button.setAttribute(
-        "style",
-        [
-          "border:1px solid #cfd8e3",
-          "background:#ffffff",
-          "border-radius:6px",
-          "font-size:12px",
-          "padding:4px 8px",
-          "cursor:pointer",
-        ].join(";"),
-      );
-      button.addEventListener("click", onClick);
-      controls.appendChild(button);
-    };
-
-    addControlButton("+", () =>
-      zoomAt(VIEWBOX_WIDTH / 2, VIEWBOX_HEIGHT / 2, 1.2),
-    );
-    addControlButton("-", () =>
-      zoomAt(VIEWBOX_WIDTH / 2, VIEWBOX_HEIGHT / 2, 0.84),
-    );
-    addControlButton("Reset", () => {
-      scale = 1;
-      tx = 0;
-      ty = 0;
-      applyTransform();
-    });
   }
 
   private static computeLayout(
