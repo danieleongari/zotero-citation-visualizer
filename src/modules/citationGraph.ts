@@ -300,7 +300,7 @@ export class CitationGraphFactory {
         id: this.collectionMenuID,
         label: "Citation Graph",
         isDisabled: () => !this.getSelectedCollectionID(),
-        commandListener: () => void this.openGraphFlow(),
+        commandListener: () => void this.openGraphFlow(true),
       });
     }
 
@@ -319,9 +319,25 @@ export class CitationGraphFactory {
     return Zotero.getMainWindow()?.ZoteroPane?.getSelectedCollection(true);
   }
 
-  private static async openGraphFlow() {
+  private static getDefaultOptions(collectionID: number): CitationGraphOptions {
+    return {
+      collectionID,
+      useOnlineLookup: true,
+      includeExternalReferences: true,
+      extensionDepth: 0,
+    };
+  }
+
+  private static async openGraphFlow(useDefaultOptions = false) {
     const defaultCollectionID = this.getSelectedCollectionID();
-    const options = await this.promptOptions(defaultCollectionID);
+    if (!defaultCollectionID) {
+      ztoolkit.getGlobal("alert")("No collection selected.");
+      return;
+    }
+
+    const options = useDefaultOptions
+      ? this.getDefaultOptions(defaultCollectionID)
+      : await this.promptOptions(defaultCollectionID);
     if (!options) return;
 
     const progressWindow = new ztoolkit.ProgressWindow("Citation Graph", {

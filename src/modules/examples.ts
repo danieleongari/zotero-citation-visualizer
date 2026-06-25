@@ -91,13 +91,6 @@ export class KeyExampleFactory {
         addon.hooks.onShortcuts("smaller");
       }
     });
-
-    new ztoolkit.ProgressWindow(addon.data.config.addonName)
-      .createLine({
-        text: "Example Shortcuts: Alt+L/S/C",
-        type: "success",
-      })
-      .show();
   }
 
   @example
