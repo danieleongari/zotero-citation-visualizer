@@ -2199,16 +2199,29 @@ function extractLocalNodeAuthorAndDate(item: Zotero.Item) {
   const creators = (((item as any).getCreators?.() || []) as any[]).filter(
     (creator) => creator,
   );
-  const authorCreators = creators.filter(
-    (creator) => String(creator.creatorType || "").toLowerCase() === "author",
-  );
+  const authorLikeCreators = creators.filter((creator) => {
+    const typeName = getCreatorTypeName(creator);
+    return typeName === "author" || typeName === "inventor";
+  });
+  const creatorsForHover = authorLikeCreators.length
+    ? authorLikeCreators
+    : creators;
 
-  const firstAuthor = authorCreators.length
-    ? formatCreatorName(authorCreators[0])
+  let firstAuthor = creatorsForHover.length
+    ? formatCreatorName(creatorsForHover[0])
     : undefined;
-  const lastAuthor = authorCreators.length
-    ? formatCreatorName(authorCreators[authorCreators.length - 1])
+  let lastAuthor = creatorsForHover.length
+    ? formatCreatorName(creatorsForHover[creatorsForHover.length - 1])
     : undefined;
+
+  // Fallback for edge cases where creator names are unavailable.
+  const firstCreatorField = String((item as any).firstCreator || "").trim();
+  if (!firstAuthor && firstCreatorField) {
+    firstAuthor = firstCreatorField;
+  }
+  if (!lastAuthor && firstCreatorField) {
+    lastAuthor = firstCreatorField;
+  }
 
   const itemDate = String(item.getField("date") || "").trim() || undefined;
   return {
@@ -2237,6 +2250,33 @@ function formatCreatorName(creator: any): string | undefined {
     return firstName;
   }
   return undefined;
+}
+
+function getCreatorTypeName(creator: any) {
+  const directType = String(
+    creator?.creatorType || creator?.creatorTypeName || "",
+  )
+    .trim()
+    .toLowerCase();
+  if (directType) {
+    return directType;
+  }
+
+  const creatorTypeID = Number.parseInt(String(creator?.creatorTypeID), 10);
+  if (
+    Number.isFinite(creatorTypeID) &&
+    (Zotero as any).CreatorTypes?.getName
+  ) {
+    try {
+      return String((Zotero as any).CreatorTypes.getName(creatorTypeID) || "")
+        .trim()
+        .toLowerCase();
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  return "";
 }
 
 function addEdge(
