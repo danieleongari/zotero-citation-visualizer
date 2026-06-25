@@ -71,9 +71,9 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   UIExampleFactory.registerStyleSheet(win);
 
-  UIExampleFactory.registerRightClickMenuItem();
-
-  UIExampleFactory.registerRightClickMenuPopup(win);
+  // Template example menu items are disabled in this plugin-focused build.
+  // UIExampleFactory.registerRightClickMenuItem();
+  // UIExampleFactory.registerRightClickMenuPopup(win);
 
   UIExampleFactory.registerWindowMenuWithSeparator();
 
@@ -93,7 +93,7 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   });
   popupWin.startCloseTimer(5000);
 
-  addon.hooks.onDialogEvents("dialogExample");
+  // Do not auto-open template dialog on startup.
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
