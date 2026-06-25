@@ -874,13 +874,13 @@ export class CitationGraphFactory {
       depth: number;
       isRoot: boolean;
     }> = [
-      {
-        collection: rootCollection,
-        path: rootCollection.name,
-        depth: 0,
-        isRoot: true,
-      },
-    ];
+        {
+          collection: rootCollection,
+          path: rootCollection.name,
+          depth: 0,
+          isRoot: true,
+        },
+      ];
     const seenCollectionIDs = new Set<number>();
 
     while (queue.length) {
@@ -1031,13 +1031,13 @@ export class CitationGraphFactory {
       const candidate = candidates[index];
       const minDistanceToSelected = selected.length
         ? Math.min(
-            ...selected.map((entry) => labDistance(candidate.lab, entry.lab)),
-          )
+          ...selected.map((entry) => labDistance(candidate.lab, entry.lab)),
+        )
         : Number.POSITIVE_INFINITY;
       const minDistanceToReserved = reservedLabs.length
         ? Math.min(
-            ...reservedLabs.map((entry) => labDistance(candidate.lab, entry)),
-          )
+          ...reservedLabs.map((entry) => labDistance(candidate.lab, entry)),
+        )
         : Number.POSITIVE_INFINITY;
 
       const score = Math.min(minDistanceToSelected, minDistanceToReserved);

@@ -5,22 +5,24 @@
 
 这是一个面向 Zotero 的引文关系可视化插件。
 
-它的目标很明确：把某个 collection 中的论文转换成一张可交互的引文图谱。你既可以只查看本地馆藏中的引文关系，也可以结合 OpenAlex 在线补全，把库外论文也一起纳入图谱中，观察更大的引用网络。
+它的目标很明确：把某个 collection 中的条目转换成一张可交互的引文图谱。默认会纳入所选 collection 及其所有子 collection 中的常规顶层条目（例如论文、专利等）。你既可以只查看本地馆藏中的引文关系，也可以结合 OpenAlex 在线补全，把库外论文也一起纳入图谱中，观察更大的引用网络。
 
 [English](../README.md) | [简体中文](./README-zhCN.md)
 
 ## 功能亮点
 
 - 直接从 Zotero 中为选定的 collection 生成引文图谱。
+- 默认纳入所选 collection 的所有子 collection 条目（常规顶层条目）。
 - 支持仅使用本地数据，或通过 OpenAlex 进行在线扩展。
 - 可控制是否纳入库外论文，以及向外扩展的层数。
+- 支持在图谱窗口中按子 collection 复选筛选，并用颜色区分子 collection。
 - 支持缩放、平移、重新加载、隐藏边和节点等交互操作。
 
 ## 快速预览
 
 ### 生成前配置
 
-在生成窗口中可以指定 collection、是否启用在线补全、是否包含外部论文以及扩展深度。
+在生成窗口中可以指定 collection、是否启用在线补全、是否包含外部论文以及扩展深度。生成后可在图谱窗口里用子 collection 复选列表筛选显示范围。
 
 ![Citation Graph 配置窗口](./start_menu.png)
 
@@ -46,10 +48,13 @@
    - `Include External Papers`
    - `External Depth`
 4. 点击 `Generate` 生成图谱。
+5. 在图谱窗口中使用 `Subcollections` 复选框（`All` / `None`）实时筛选子 collection。
 
 ## 图谱交互说明
 
-- 蓝色节点表示当前选中 collection 中已有的条目；点击后会在 Zotero 中定位该条目。
+- 蓝色节点表示当前根 collection 范围内可见的本地条目。
+- 其他颜色的本地节点表示来自对应子 collection（颜色与子 collection 列表中的色块一致）。
+- 灰色本地节点表示该条目同时属于多个已选子 collection。
 - 橙色节点表示库外论文；点击后会打开其 DOI 页面或 OpenAlex 页面。
 - 右键节点可以隐藏相关边、隐藏孤立节点，或重置隐藏状态。
 - 可使用鼠标滚轮或触控板手势进行缩放与平移。

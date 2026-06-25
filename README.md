@@ -5,22 +5,24 @@
 
 Build interactive citation graphs from any Zotero collection.
 
-Zotero Citation Visualizer focuses on one job: turning the papers in a selected collection into an explorable citation network. It can work with local library data only, or enrich the graph with OpenAlex so you can pull in external papers and inspect a broader citation neighborhood.
+Zotero Citation Visualizer focuses on one job: turning items in a selected collection into an explorable citation network. It includes regular top-level items from the selected collection and all descendant subcollections by default (for example, papers and patents). It can work with local library data only, or enrich the graph with OpenAlex so you can pull in external papers and inspect a broader citation neighborhood.
 
 [English](README.md) | [简体中文](doc/README-zhCN.md)
 
 ## Highlights
 
 - Generate a citation graph for the selected collection directly from Zotero.
+- Include regular top-level items from descendant subcollections by default.
 - Use local citation relations only, or enrich results online with OpenAlex.
 - Include external papers and control how deep the graph expands beyond your library.
+- Filter subcollections with checkbox chips and color local nodes by subcollection.
 - Explore the graph with zoom, pan, reload, node filtering, and click-through actions.
 
 ## Quick Look
 
 ### Configure the graph
 
-Choose the collection to analyze, enable online enrichment if needed, and set whether external papers should be included.
+Choose the collection to analyze, enable online enrichment if needed, and set whether external papers should be included. After generation, you can select which subcollections remain visible from the subcollection checkbox list in the graph window.
 
 ![Citation Graph options dialog](doc/start_menu.png)
 
@@ -46,10 +48,13 @@ With online enrichment enabled and external depth set to `1`, the graph can reve
    - `Include External Papers`
    - `External Depth`
 4. Click `Generate`.
+5. In the graph window, use the `Subcollections` checkboxes (`All` / `None`) to filter descendant subcollections in place.
 
 ## Graph Interaction
 
-- Blue nodes are items already inside the selected collection; clicking one selects it in Zotero.
+- Blue nodes are local items visible via the selected root collection scope.
+- Colored local nodes map to selected subcollections (color chips in the subcollection list).
+- Gray local nodes belong to multiple selected subcollections.
 - Orange nodes are external papers; clicking one opens its DOI or OpenAlex page.
 - Right-click a node to hide connected edges, hide isolated nodes, or reset hidden elements.
 - Use the mouse wheel or pinch to zoom, and drag / two-finger pan to move around the graph.
