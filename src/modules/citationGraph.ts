@@ -12,6 +12,9 @@ const XHTML_NS = "http://www.w3.org/1999/xhtml";
 const ROOT_LOCAL_NODE_COLOR = "#1976d2";
 const MULTI_SUBCOLLECTION_NODE_COLOR = "#64748b";
 const EXTERNAL_NODE_COLOR = "#ef6c00";
+const NODE_TOOLTIP_DELAY_MS = 80;
+const NODE_TOOLTIP_OFFSET_X = 14;
+const NODE_TOOLTIP_OFFSET_Y = 14;
 const SUBCOLLECTION_PALETTE = [
   "#0077b6",
   "#2a9d8f",
@@ -41,6 +44,9 @@ interface GraphNode {
   doi?: string;
   openAlexID?: string;
   depth: number;
+  firstAuthor?: string;
+  lastAuthor?: string;
+  itemDate?: string;
   isInRootCollection?: boolean;
   subcollectionIDs?: number[];
   subcollectionPaths?: string[];
@@ -548,6 +554,7 @@ export class CitationGraphFactory {
       const nodeID = `local:${item.libraryID}:${item.key}`;
       const title = (item.getDisplayTitle() || item.getField("title")).trim();
       const doi = normalizeDOI(item.getField("DOI"));
+      const authorDateInfo = extractLocalNodeAuthorAndDate(item);
       const membership = localScope.itemMemberships.get(item.id);
       const node: GraphNode = {
         id: nodeID,
@@ -557,6 +564,9 @@ export class CitationGraphFactory {
         label: title || `Item ${item.id}`,
         doi,
         depth: 0,
+        firstAuthor: authorDateInfo.firstAuthor,
+        lastAuthor: authorDateInfo.lastAuthor,
+        itemDate: authorDateInfo.itemDate,
         isInRootCollection: membership?.isInRootCollection ?? false,
         subcollectionIDs: membership?.subcollectionIDs || [],
         subcollectionPaths: membership?.subcollectionPaths || [],
@@ -1620,6 +1630,91 @@ export class CitationGraphFactory {
     );
     container.appendChild(root);
 
+    const hoverTooltip = doc.createElementNS(
+      XHTML_NS,
+      "div",
+    ) as unknown as HTMLElement;
+    hoverTooltip.setAttribute(
+      "style",
+      [
+        "position:absolute",
+        "z-index:30",
+        "display:none",
+        "pointer-events:none",
+        "max-width:320px",
+        "padding:7px 9px",
+        "border-radius:8px",
+        "background:rgba(15,23,42,0.92)",
+        "color:#f8fafc",
+        "font-size:12px",
+        "line-height:1.35",
+        "box-shadow:0 10px 26px rgba(2,6,23,0.28)",
+        "border:1px solid rgba(148,163,184,0.35)",
+        "white-space:normal",
+      ].join(";"),
+    );
+    root.appendChild(hoverTooltip);
+
+    let tooltipTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingTooltipNode: GraphNode | undefined;
+    let pendingTooltipX = 0;
+    let pendingTooltipY = 0;
+
+    const setTooltipPosition = (clientX: number, clientY: number) => {
+      const rootRect = root.getBoundingClientRect();
+      const tooltipRect = hoverTooltip.getBoundingClientRect();
+      const maxX = Math.max(8, rootRect.width - tooltipRect.width - 8);
+      const maxY = Math.max(8, rootRect.height - tooltipRect.height - 8);
+      const x = clampNumber(clientX - rootRect.left + NODE_TOOLTIP_OFFSET_X, 8, maxX);
+      const y = clampNumber(clientY - rootRect.top + NODE_TOOLTIP_OFFSET_Y, 8, maxY);
+      hoverTooltip.style.left = `${x}px`;
+      hoverTooltip.style.top = `${y}px`;
+    };
+
+    const hideNodeTooltip = () => {
+      if (tooltipTimer) {
+        clearTimeout(tooltipTimer);
+        tooltipTimer = undefined;
+      }
+      pendingTooltipNode = undefined;
+      hoverTooltip.style.display = "none";
+      hoverTooltip.textContent = "";
+    };
+
+    const showNodeTooltip = (node: GraphNode, clientX: number, clientY: number) => {
+      const lines = buildNodeTooltipLines(node, viewState, subcollectionPathByID);
+      hoverTooltip.textContent = "";
+      for (const line of lines) {
+        const row = doc.createElement("div");
+        row.textContent = line;
+        hoverTooltip.appendChild(row);
+      }
+      hoverTooltip.style.display = "block";
+      setTooltipPosition(clientX, clientY);
+    };
+
+    const scheduleNodeTooltip = (node: GraphNode, clientX: number, clientY: number) => {
+      if (tooltipTimer) {
+        clearTimeout(tooltipTimer);
+        tooltipTimer = undefined;
+      }
+      pendingTooltipNode = node;
+      pendingTooltipX = clientX;
+      pendingTooltipY = clientY;
+      tooltipTimer = setTimeout(() => {
+        if (!pendingTooltipNode) return;
+        showNodeTooltip(pendingTooltipNode, pendingTooltipX, pendingTooltipY);
+      }, NODE_TOOLTIP_DELAY_MS);
+    };
+
+    const updateNodeTooltipPosition = (clientX: number, clientY: number) => {
+      pendingTooltipX = clientX;
+      pendingTooltipY = clientY;
+      if (hoverTooltip.style.display !== "none") {
+        setTooltipPosition(clientX, clientY);
+      }
+    };
+
     const svg = doc.createElementNS(SVG_NS, "svg") as unknown as SVGSVGElement;
     svg.setAttribute("width", "100%");
     svg.setAttribute("height", "100%");
@@ -1762,6 +1857,7 @@ export class CitationGraphFactory {
       svg.style.cursor = "grab";
     });
     svg.addEventListener("mouseleave", () => {
+      hideNodeTooltip();
       if (!isPanning) return;
       isPanning = false;
       svg.style.cursor = "grab";
@@ -1837,31 +1933,23 @@ export class CitationGraphFactory {
         group.appendChild(label);
       }
 
-      const tooltip = doc.createElementNS(SVG_NS, "title");
-      const tooltipLines: string[] = [node.title];
-      if (node.doi) {
-        tooltipLines.push(`DOI: ${node.doi}`);
-      }
-      if (node.nodeType === "local") {
-        if (node.isInRootCollection) {
-          tooltipLines.push("Root collection: yes");
-        }
-        if (node.subcollectionPaths?.length) {
-          tooltipLines.push(`Subcollections: ${node.subcollectionPaths.join(" | ")}`);
-        }
-        const selectedPaths = (node.subcollectionIDs || [])
-          .filter((id) => viewState.selectedSubcollectionIDs.has(id))
-          .map((id) => subcollectionPathByID.get(id) || `#${id}`);
-        if (selectedPaths.length > 1) {
-          tooltipLines.push(`Visible via multiple selected subcollections (${selectedPaths.length})`);
-        }
-      }
-      tooltip.textContent = tooltipLines.filter(Boolean).join("\n");
-      group.appendChild(tooltip);
+      group.addEventListener("mouseenter", (event: MouseEvent) => {
+        scheduleNodeTooltip(node, event.clientX, event.clientY);
+      });
+      group.addEventListener("mousemove", (event: MouseEvent) => {
+        updateNodeTooltipPosition(event.clientX, event.clientY);
+      });
+      group.addEventListener("mouseleave", () => {
+        hideNodeTooltip();
+      });
 
-      group.addEventListener("click", () => this.handleNodeClick(node));
+      group.addEventListener("click", () => {
+        hideNodeTooltip();
+        this.handleNodeClick(node);
+      });
       group.addEventListener("contextmenu", (event: MouseEvent) => {
         event.preventDefault();
+        hideNodeTooltip();
         callbacks?.onNodeContextMenu?.(node, event, root);
       });
       viewport.appendChild(group);
@@ -2062,6 +2150,93 @@ export class CitationGraphFactory {
     menuDoc.addEventListener("click", closeMenu);
     root.appendChild(menu);
   }
+}
+
+function buildNodeTooltipLines(
+  node: GraphNode,
+  viewState: GraphViewState,
+  subcollectionPathByID: Map<number, string>,
+) {
+  const tooltipLines: string[] = [node.title];
+
+  if (node.nodeType === "local") {
+    if (node.firstAuthor) {
+      tooltipLines.push(`First author: ${node.firstAuthor}`);
+    }
+    if (node.lastAuthor) {
+      tooltipLines.push(`Last author: ${node.lastAuthor}`);
+    }
+    if (node.itemDate) {
+      tooltipLines.push(`Date: ${node.itemDate}`);
+    }
+  }
+
+  if (node.doi) {
+    tooltipLines.push(`DOI: ${node.doi}`);
+  }
+
+  if (node.nodeType === "local") {
+    if (node.isInRootCollection) {
+      tooltipLines.push("Root collection: yes");
+    }
+    if (node.subcollectionPaths?.length) {
+      tooltipLines.push(`Subcollections: ${node.subcollectionPaths.join(" | ")}`);
+    }
+    const selectedPaths = (node.subcollectionIDs || [])
+      .filter((id) => viewState.selectedSubcollectionIDs.has(id))
+      .map((id) => subcollectionPathByID.get(id) || `#${id}`);
+    if (selectedPaths.length > 1) {
+      tooltipLines.push(
+        `Visible via multiple selected subcollections (${selectedPaths.length})`,
+      );
+    }
+  }
+
+  return tooltipLines.filter(Boolean);
+}
+
+function extractLocalNodeAuthorAndDate(item: Zotero.Item) {
+  const creators = (((item as any).getCreators?.() || []) as any[]).filter(
+    (creator) => creator,
+  );
+  const authorCreators = creators.filter(
+    (creator) => String(creator.creatorType || "").toLowerCase() === "author",
+  );
+
+  const firstAuthor = authorCreators.length
+    ? formatCreatorName(authorCreators[0])
+    : undefined;
+  const lastAuthor = authorCreators.length
+    ? formatCreatorName(authorCreators[authorCreators.length - 1])
+    : undefined;
+
+  const itemDate = String(item.getField("date") || "").trim() || undefined;
+  return {
+    firstAuthor,
+    lastAuthor,
+    itemDate,
+  };
+}
+
+function formatCreatorName(creator: any): string | undefined {
+  const singleFieldName = String(creator?.name || "").trim();
+  if (singleFieldName) {
+    return singleFieldName;
+  }
+
+  const lastName = String(creator?.lastName || "").trim();
+  const firstName = String(creator?.firstName || "").trim();
+
+  if (lastName && firstName) {
+    return `${lastName}, ${firstName}`;
+  }
+  if (lastName) {
+    return lastName;
+  }
+  if (firstName) {
+    return firstName;
+  }
+  return undefined;
 }
 
 function addEdge(
